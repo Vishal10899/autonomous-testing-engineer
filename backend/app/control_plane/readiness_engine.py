@@ -2,8 +2,8 @@ from typing import Dict, Any, List, Optional
 
 class ReadinessEngine:
     """
-    Defensible Production Readiness Engine (PRD Section 83, 84, 85, 86)
-    Calculates multi-domain scores: Functional, Security, Performance, Reliability, AI Quality, Data Integrity.
+    Defensible Production Readiness Engine (PRD Section 31)
+    Calculates multi-domain scores: Security, Performance, Reliability, API, Database, AI Quality, Regression.
     Critical findings serve as immediate release blockers forcing NOT_READY status.
     """
     @staticmethod
@@ -20,18 +20,22 @@ class ReadinessEngine:
         passed_tests = sum(1 for r in test_results if r.get("status") == "PASSED")
         failed_tests = sum(1 for r in test_results if r.get("status") in ("FAILED", "ANOMALY"))
 
-        # Category breakdown
+        # Category breakdown across PRD Section 31 domains
         domains = {
             "Functional": {"passed": 0, "total": 0, "score": 100.0},
             "API": {"passed": 0, "total": 0, "score": 100.0},
             "Security": {"passed": 0, "total": 0, "score": 100.0},
             "Performance": {"passed": 0, "total": 0, "score": 100.0},
+            "Reliability": {"passed": 0, "total": 0, "score": 100.0},
             "Database": {"passed": 0, "total": 0, "score": 100.0},
-            "AI Quality": {"passed": 0, "total": 0, "score": 100.0}
+            "AI Quality": {"passed": 0, "total": 0, "score": 100.0},
+            "Regression": {"passed": 0, "total": 0, "score": 100.0}
         }
 
         for r in test_results:
             cat = r.get("category", "Functional")
+            if cat == "AI":
+                cat = "AI Quality"
             if cat not in domains:
                 cat = "Functional"
             domains[cat]["total"] += 1
@@ -43,9 +47,9 @@ class ReadinessEngine:
                 domains[cat]["score"] = round((domains[cat]["passed"] / domains[cat]["total"]) * 100.0, 1)
 
         # Count severity of findings
-        critical_count = sum(1 for f in findings if f.get("severity") == "CRITICAL" and f.get("status") == "CONFIRMED")
-        high_count = sum(1 for f in findings if f.get("severity") == "HIGH" and f.get("status") == "CONFIRMED")
-        medium_count = sum(1 for f in findings if f.get("severity") == "MEDIUM" and f.get("status") == "CONFIRMED")
+        critical_count = sum(1 for f in findings if f.get("severity") in ("CRITICAL", "CRITICAL") and f.get("status") in ("CONFIRMED", "POTENTIAL", "INVESTIGATING"))
+        high_count = sum(1 for f in findings if f.get("severity") == "HIGH" and f.get("status") in ("CONFIRMED", "POTENTIAL", "INVESTIGATING"))
+        medium_count = sum(1 for f in findings if f.get("severity") == "MEDIUM" and f.get("status") in ("CONFIRMED", "POTENTIAL", "INVESTIGATING"))
 
         # Overall Base Score Calculation
         raw_score = (passed_tests / total_tests) * 100.0
@@ -54,7 +58,7 @@ class ReadinessEngine:
         penalty = (critical_count * 40.0) + (high_count * 20.0) + (medium_count * 5.0)
         final_score = max(0.0, min(100.0, raw_score - penalty))
 
-        # Defensible Verdict logic (PRD Section 85)
+        # Defensible Verdict logic (PRD Section 31)
         if critical_count > 0:
             verdict = "NOT_READY"
             reason = f"Production release blocked by {critical_count} critical finding(s)."

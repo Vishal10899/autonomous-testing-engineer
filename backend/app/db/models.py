@@ -17,20 +17,28 @@ def utc_now() -> datetime:
 # Enums
 class RunStatus(str, enum.Enum):
     CREATED = "CREATED"
-    AUTHORIZED = "AUTHORIZED"
+    QUEUED = "QUEUED"
     DISCOVERING = "DISCOVERING"
     MODELING = "MODELING"
     RISK_ANALYSIS = "RISK_ANALYSIS"
     PLANNING = "PLANNING"
-    QUEUED = "QUEUED"
     EXECUTING = "EXECUTING"
     OBSERVING = "OBSERVING"
-    VERIFYING = "VERIFYING"
-    INVESTIGATING = "INVESTIGATING"
-    REPORTING = "REPORTING"
+    VALIDATING = "VALIDATING"
+    REPRODUCING = "REPRODUCING"
+    RCA = "RCA"
+    REMEDIATION_PENDING = "REMEDIATION_PENDING"
+    RETESTING = "RETESTING"
+    REGRESSION = "REGRESSION"
+    CERTIFYING = "CERTIFYING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    # Backwards compatibility aliases
+    AUTHORIZED = "AUTHORIZED"
+    VERIFYING = "VERIFYING"
+    INVESTIGATING = "INVESTIGATING"
+    REPORTING = "REPORTING"
     INCONCLUSIVE = "INCONCLUSIVE"
 
 class FindingSeverity(str, enum.Enum):
@@ -42,10 +50,17 @@ class FindingSeverity(str, enum.Enum):
 
 class FindingStatus(str, enum.Enum):
     POTENTIAL = "POTENTIAL"
+    OBSERVED = "OBSERVED"
+    SUSPECTED = "SUSPECTED"
+    VALIDATING = "VALIDATING"
     INVESTIGATING = "INVESTIGATING"
     REPRODUCING = "REPRODUCING"
     CONFIRMED = "CONFIRMED"
     FALSE_POSITIVE = "FALSE_POSITIVE"
+    ACCEPTED_RISK = "ACCEPTED_RISK"
+    NOT_REPRODUCIBLE = "NOT_REPRODUCIBLE"
+    MITIGATED = "MITIGATED"
+    RESOLVED = "RESOLVED"
     FLAKY = "FLAKY"
     ENVIRONMENT_FAILURE = "ENVIRONMENT_FAILURE"
     DEPENDENCY_FAILURE = "DEPENDENCY_FAILURE"
@@ -63,6 +78,18 @@ class RCAConfidence(str, enum.Enum):
     MODERATELY_INFERRED = "MODERATELY_INFERRED"
     WEAK_HYPOTHESIS = "WEAK_HYPOTHESIS"
     UNKNOWN = "UNKNOWN"
+
+class PolicyLevel(str, enum.Enum):
+    SAFE = "SAFE"
+    STANDARD = "STANDARD"
+    DEEP = "DEEP"
+    PRODUCTION = "PRODUCTION"
+
+class RetestVerdict(str, enum.Enum):
+    RESOLVED = "RESOLVED"
+    PARTIALLY_RESOLVED = "PARTIALLY_RESOLVED"
+    STILL_VULNERABLE = "STILL_VULNERABLE"
+    REGRESSION = "REGRESSION"
 
 # Core Models
 class Organization(Base):
@@ -101,15 +128,25 @@ class Project(Base):
     workspace_id: Mapped[str] = mapped_column(String, ForeignKey("workspaces.id"), nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    target_owner: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    target_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    environment: Mapped[str] = mapped_column(String, default="DEV") # DEV, TEST, STAGING, PRODUCTION
+    policy_level: Mapped[str] = mapped_column(String, default="STANDARD") # SAFE, STANDARD, DEEP, PRODUCTION
+    authorization_status: Mapped[str] = mapped_column(String, default="AUTHORIZED") # AUTHORIZED, PENDING, REVOKED
+    authorized_domains: Mapped[List[str]] = mapped_column(JSON, default=list)
+    authorized_ip_ranges: Mapped[List[str]] = mapped_column(JSON, default=list)
+    authorized_endpoints: Mapped[List[str]] = mapped_column(JSON, default=list)
+    testing_window: Mapped[Optional[str]] = mapped_column(String, default="ANYTIME")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 class Environment(Base):
     __tablename__ = "environments"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
-    name: Mapped[str] = mapped_column(String, nullable=False) # e.g. dev, staging, prod
+    name: Mapped[str] = mapped_column(String, nullable=False) # DEV, TEST, STAGING, PRODUCTION
     base_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     is_production: Mapped[bool] = mapped_column(Boolean, default=False)
+    policy_level: Mapped[str] = mapped_column(String, default="STANDARD")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 class Target(Base):
@@ -118,6 +155,13 @@ class Target(Base):
     project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
     type: Mapped[str] = mapped_column(String, nullable=False) # web, api, repo, container, ai, ml
     url_or_path: Mapped[str] = mapped_column(String, nullable=False)
+    target_owner: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    authorization_status: Mapped[str] = mapped_column(String, default="AUTHORIZED")
+    authorized_domains: Mapped[List[str]] = mapped_column(JSON, default=list)
+    authorized_ip_ranges: Mapped[List[str]] = mapped_column(JSON, default=list)
+    authorized_endpoints: Mapped[List[str]] = mapped_column(JSON, default=list)
+    testing_window: Mapped[Optional[str]] = mapped_column(String, default="ANYTIME")
+    max_test_intensity: Mapped[str] = mapped_column(String, default="STANDARD")
     metadata_info: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -126,6 +170,7 @@ class Policy(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False, default="Default Safety Policy")
+    policy_level: Mapped[str] = mapped_column(String, default="STANDARD") # SAFE, STANDARD, DEEP, PRODUCTION
     max_rps: Mapped[int] = mapped_column(Integer, default=1000)
     max_concurrency: Mapped[int] = mapped_column(Integer, default=500)
     max_requests: Mapped[int] = mapped_column(Integer, default=100000)
@@ -133,16 +178,39 @@ class Policy(Base):
     destructive_tests: Mapped[bool] = mapped_column(Boolean, default=False)
     database_mutation: Mapped[bool] = mapped_column(Boolean, default=False)
     chaos: Mapped[bool] = mapped_column(Boolean, default=False)
+    allowed_domains: Mapped[List[str]] = mapped_column(JSON, default=list)
+    allowed_ips: Mapped[List[str]] = mapped_column(JSON, default=list)
+    allowed_methods: Mapped[List[str]] = mapped_column(JSON, default=lambda: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
+    allowed_test_classes: Mapped[List[str]] = mapped_column(JSON, default=lambda: ["API", "Security", "Database", "Performance", "AI", "Reliability", "Browser", "Mutation", "BusinessLogic"])
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+class SandboxExecution(Base):
+    __tablename__ = "sandbox_executions"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="CREATED") # CREATED, CONFIGURED, DEPLOYED, HEALTHY, TESTING, COLLECTED, DESTROYED
+    cpu_limit: Mapped[str] = mapped_column(String, default="2.0")
+    memory_limit: Mapped[str] = mapped_column(String, default="4GB")
+    disk_limit: Mapped[str] = mapped_column(String, default="10GB")
+    execution_timeout_seconds: Mapped[int] = mapped_column(Integer, default=600)
+    domain_allowlist: Mapped[List[str]] = mapped_column(JSON, default=list)
+    ip_allowlist: Mapped[List[str]] = mapped_column(JSON, default=list)
+    ephemeral_target_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    destroyed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 class SystemNode(Base):
     __tablename__ = "system_nodes"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    type: Mapped[str] = mapped_column(String, nullable=False) # Service, Page, Endpoint, Database, Cache, External API, AI Model
+    type: Mapped[str] = mapped_column(String, nullable=False) # Service, Page, Endpoint, Database, Cache, External API, AI Model, Queue, Webhook
     technology: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     risk_level: Mapped[str] = mapped_column(String, default="MEDIUM")
+    dependencies: Mapped[List[str]] = mapped_column(JSON, default=list)
+    auth_requirement: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    data_sensitivity: Mapped[str] = mapped_column(String, default="LOW") # LOW, MEDIUM, HIGH, CRITICAL_PII
     metadata_info: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -182,38 +250,47 @@ class Endpoint(Base):
     protocol: Mapped[str] = mapped_column(String, default="REST")
     schema_info: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
 
-class TestStrategy(Base):
-    __tablename__ = "test_strategies"
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
-    project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
-    rationale: Mapped[str] = mapped_column(Text, nullable=False)
-    priorities: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list)
-
 class TestCase(Base):
+    __test__ = False
     __tablename__ = "test_cases"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    category: Mapped[str] = mapped_column(String, nullable=False) # Functional, API, Security, Performance, Database, AI, Chaos
+    category: Mapped[str] = mapped_column(String, nullable=False) # Functional, API, Security, Performance, Database, AI, Chaos, Mutation, BusinessLogic
     fingerprint: Mapped[str] = mapped_column(String, index=True, nullable=False) # Semantic deduplication hash
     payload: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 class TestRun(Base):
+    __test__ = False
     __tablename__ = "test_runs"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     project_id: Mapped[str] = mapped_column(String, ForeignKey("projects.id"), nullable=False)
     target_id: Mapped[str] = mapped_column(String, ForeignKey("targets.id"), nullable=False)
     policy_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("policies.id"), nullable=True)
     status: Mapped[RunStatus] = mapped_column(SQLEnum(RunStatus), default=RunStatus.CREATED)
-    readiness_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True) # Null unless calculated
+    readiness_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     readiness_verdict: Mapped[Optional[ReadinessStatus]] = mapped_column(SQLEnum(ReadinessStatus), nullable=True)
+    
+    # PRD v8.0 Primary KPI: Human Effort Reduction Metrics
+    estimated_manual_hours: Mapped[Optional[float]] = mapped_column(Float, default=0.0)
+    automated_hours: Mapped[Optional[float]] = mapped_column(Float, default=0.0)
+    human_review_hours: Mapped[Optional[float]] = mapped_column(Float, default=0.0)
+    effort_reduction_percentage: Mapped[Optional[float]] = mapped_column(Float, default=0.0)
+    effort_metrics: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+    
+    # PRD v8.0 Coverage & Budget
+    coverage_summary: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+    test_budget: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+    onboarding_mode: Mapped[str] = mapped_column(String, default="URL") # URL, OPENAPI, REPO, DOCKER, ENVIRONMENT
+
     summary_report: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 class TestResult(Base):
+    __test__ = False
     __tablename__ = "test_results"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     run_id: Mapped[str] = mapped_column(String, ForeignKey("test_runs.id"), nullable=False)
@@ -227,7 +304,7 @@ class EvidenceItem(Base):
     __tablename__ = "evidence_items"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     run_id: Mapped[str] = mapped_column(String, ForeignKey("test_runs.id"), nullable=False)
-    type: Mapped[str] = mapped_column(String, nullable=False) # request_response, screenshot, trace, log, db_snapshot, repro_script
+    type: Mapped[str] = mapped_column(String, nullable=False) # request_response, screenshot, trace, log, db_snapshot, repro_script, diff
     sha256_hash: Mapped[str] = mapped_column(String, nullable=False)
     storage_path: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
@@ -245,10 +322,19 @@ class Finding(Base):
     symptom: Mapped[str] = mapped_column(Text, nullable=False)
     root_cause: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     rca_confidence: Mapped[Optional[RCAConfidence]] = mapped_column(SQLEnum(RCAConfidence), nullable=True)
+    confidence_score: Mapped[float] = mapped_column(Float, default=95.0) # 0 to 100
     business_impact: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     remediation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    reproduction_rate: Mapped[Optional[str]] = mapped_column(String, nullable=True) # e.g. "31/31 attempts"
+    remediation_diff: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reproduction_rate: Mapped[Optional[str]] = mapped_column(String, nullable=True) # e.g. "10/10 attempts"
     repro_script: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    retest_verdict: Mapped[Optional[str]] = mapped_column(String, nullable=True) # RESOLVED, PARTIALLY_RESOLVED, STILL_VULNERABLE, REGRESSION
+    evidence_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
+    # PRD v8.0 Human-in-the-Loop & Review Queue
+    is_human_review_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    human_review_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 class FindingEvidence(Base):
@@ -278,7 +364,7 @@ class BenchmarkApp(Base):
     __tablename__ = "benchmark_apps"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    category: Mapped[str] = mapped_column(String, nullable=False) # e.g. Auth, SQLi, BOLA, RaceCondition, LLM_Hallucination, etc.
+    category: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
 
 class BenchmarkDefect(Base):

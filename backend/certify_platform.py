@@ -1,16 +1,22 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath("backend"))
+sys.path.insert(0, os.path.abspath("."))
+
 import asyncio
 import time
 import httpx
 import uvicorn
 import threading
-import os
 import json
 import hashlib
 from fastapi import FastAPI, HTTPException, Header, Query
 from pydantic import BaseModel
 
 from app.db.database import init_db, AsyncSessionLocal
-from app.db.models import TestRun, Finding, RunStatus, FindingSeverity
+from app.db.models import (
+    TestRun, Finding, RunStatus, FindingSeverity, Organization, Workspace, Project, Target
+)
 from app.control_plane.orchestrator import AutonomousOrchestrator, CANCELLED_RUN_IDS
 from app.policies.safety_broker import SafetyBroker, PolicyRules
 from app.engines.performance_engine import PerformanceEngine
@@ -23,7 +29,7 @@ sentinel_app = FastAPI(title="Sentinel AI Target Application")
 
 @sentinel_app.get("/api/v1/health")
 def sentinel_health():
-    return {"status": "ok", "service": "Sentinel AI Gateway", "version": "2.4"}
+    return {"status": "ok", "service": "Sentinel AI Gateway", "version": "7.0"}
 
 @sentinel_app.get("/api/v1/agents")
 def list_agents():
@@ -31,7 +37,7 @@ def list_agents():
 
 @sentinel_app.post("/api/v1/agent/query")
 def query_agent(prompt: str):
-    if "ignore previous instructions" in prompt.lower():
+    if "ignore previous instructions" in prompt.lower() or "override" in prompt.lower():
         return {"output": "EXPLOITED: Leak system prompt", "is_safe": False}
     return {"output": "Code analysis completed cleanly.", "is_safe": True}
 
@@ -44,9 +50,32 @@ def start_server(app_instance, port):
     time.sleep(1.5)
     return server
 
+async def ensure_base_entities(db, project_id: str, target_id: str, target_url: str):
+    from sqlalchemy import select
+    org_stmt = select(Organization).where(Organization.id == "default_org")
+    if not (await db.execute(org_stmt)).scalar_one_or_none():
+        db.add(Organization(id="default_org", name="Default Organization"))
+        await db.flush()
+
+    ws_stmt = select(Workspace).where(Workspace.id == "default_ws")
+    if not (await db.execute(ws_stmt)).scalar_one_or_none():
+        db.add(Workspace(id="default_ws", org_id="default_org", name="Default Workspace"))
+        await db.flush()
+
+    proj_stmt = select(Project).where(Project.id == project_id)
+    if not (await db.execute(proj_stmt)).scalar_one_or_none():
+        db.add(Project(id=project_id, workspace_id="default_ws", name=f"Project {project_id}", target_url=target_url))
+        await db.flush()
+
+    target_stmt = select(Target).where(Target.id == target_id)
+    if not (await db.execute(target_stmt)).scalar_one_or_none():
+        db.add(Target(id=target_id, project_id=project_id, type="web_api", url_or_path=target_url, authorization_status="AUTHORIZED"))
+        await db.flush()
+    await db.commit()
+
 async def run_certification_suite():
     print("=" * 80)
-    print("AUTONOMOUS TESTING ENGINEER v5.0 — MASTER CERTIFICATION SUITE")
+    print("AUTONOMOUS TESTING ENGINEER v7.0 — MASTER CERTIFICATION SUITE")
     print("=" * 80)
 
     # Initialize Database
@@ -66,6 +95,7 @@ async def run_certification_suite():
     # ---------------------------------------------------------
     print("\n--- GATE 1: Golden Benchmark Real Runtime Execution ---")
     async with AsyncSessionLocal() as db:
+        await ensure_base_entities(db, "gate1_proj", "bench_target", "http://127.0.0.1:8000")
         run_1 = TestRun(project_id="gate1_proj", target_id="bench_target", status=RunStatus.CREATED)
         db.add(run_1)
         await db.commit()
@@ -97,6 +127,7 @@ async def run_certification_suite():
     # ---------------------------------------------------------
     print("\n--- GATE 2: Full Autonomous Loop E2E Workflow ---")
     async with AsyncSessionLocal() as db:
+        await ensure_base_entities(db, "gate2_proj", "e2e_target", "http://127.0.0.1:8000")
         run_2 = TestRun(project_id="gate2_proj", target_id="e2e_target", status=RunStatus.CREATED)
         db.add(run_2)
         await db.commit()
@@ -135,6 +166,7 @@ async def run_certification_suite():
     # ---------------------------------------------------------
     print("\n--- GATE 4: Emergency Kill-Switch Active Execution Termination ---")
     async with AsyncSessionLocal() as db:
+        await ensure_base_entities(db, "gate4_proj", "kill_target", "http://127.0.0.1:8000")
         run_4 = TestRun(project_id="gate4_proj", target_id="kill_target", status=RunStatus.CREATED)
         db.add(run_4)
         await db.commit()
@@ -154,7 +186,6 @@ async def run_certification_suite():
     # GATE 5: Fault Tolerance & Resiliency Validation
     # ---------------------------------------------------------
     print("\n--- GATE 5: Fault Tolerance & Failure Recovery Validation ---")
-    # Test handling unavailable target port (e.g. 9999)
     try:
         async with httpx.AsyncClient(timeout=1.0) as client:
             res = await client.get("http://127.0.0.1:9999")
@@ -179,7 +210,7 @@ async def run_certification_suite():
     hash_verified = ev_item["sha256_hash"] == expected_hash
     print(f"SHA-256 Hash Match Verified: {hash_verified} ({ev_item['sha256_hash'][:16]}...)")
 
-    repro_code = ev_mgr.generate_reproduction_script("http://127.0.0.1:8000/benchmark/api/v1/user/profile", "GET", {}, None)
+    repro_code = ev_mgr.generate_reproduction_script("http://127.0.0.1:8000/api/v1/user/profile", "GET", {}, None)
     repro_valid = "def run_reproduction():" in repro_code and "requests.request" in repro_code
     print(f"Standalone Reproduction Script Generated: {repro_valid}")
 
@@ -212,13 +243,13 @@ async def run_certification_suite():
     # ---------------------------------------------------------
     print("\n--- GATE 8: Sentinel AI Autonomous Target Certification ---")
     async with AsyncSessionLocal() as db:
+        await ensure_base_entities(db, "gate8_sentinel", "sentinel_target", "http://127.0.0.1:8001")
         run_8 = TestRun(project_id="gate8_sentinel", target_id="sentinel_target", status=RunStatus.CREATED)
         db.add(run_8)
         await db.commit()
         await db.refresh(run_8)
 
         orchestrator_8 = AutonomousOrchestrator(db, run_8.id)
-        # Autonomous discovery & testing against Sentinel AI target without hardcoded rules
         await orchestrator_8.run_autonomous_loop("http://127.0.0.1:8001")
 
         await db.refresh(run_8)

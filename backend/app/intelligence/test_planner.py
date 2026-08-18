@@ -1,7 +1,7 @@
 import hashlib
 import json
 from typing import Dict, Any, List
-from .risk_engine import RiskEngine
+from app.intelligence.risk_engine import RiskEngine
 
 class AutonomousTestPlanner:
     __test__ = False

@@ -1,43 +1,63 @@
 import httpx
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+from app.engines.sql_injection_engine import SQLInjectionEngine
+from app.engines.authorization_engine import AuthorizationEngine
+from app.engines.auth_resilience_engine import AuthenticationResilienceEngine
+from app.engines.api_security_engine import APISecurityEngine
+from app.engines.business_logic_engine import BusinessLogicEngine
+from app.engines.race_condition_engine import RaceConditionEngine
 
 class SecurityEngine:
     """
-    Security Testing Engine (PRD Section 33 & 34)
-    Tests BOLA/IDOR, SQL Injection, Command Injection, SSRF, Broken Auth, and Business Logic Replay attacks.
+    Unified Security & Adversarial Testing Facade (PRD Sections 11–18)
+    Dispatches to dedicated specialized testing engines:
+    - SQLInjectionEngine (Section 13)
+    - AuthenticationResilienceEngine (Section 14)
+    - AuthorizationEngine (Section 15)
+    - APISecurityEngine (Section 16)
+    - BusinessLogicEngine (Section 17)
+    - RaceConditionEngine (Section 18)
     """
-    @staticmethod
-    async def execute_security_probe(base_url: str, test_payload: Dict[str, Any]) -> Dict[str, Any]:
-        attack_type = test_payload.get("attack", "bola_authorization_bypass")
-        path = test_payload.get("path", "/api/user/profile")
-        target_url = base_url.rstrip("/") + path
 
+    @classmethod
+    async def execute_security_probe(cls, base_url: str, test_payload: Dict[str, Any]) -> Dict[str, Any]:
+        attack_type = test_payload.get("attack", "bola_authorization_bypass")
+        path = test_payload.get("path", "/api/v1/user/profile")
+
+        if attack_type in ("sql_injection", "sqli"):
+            return await SQLInjectionEngine.execute(base_url, test_payload)
+
+        elif attack_type in ("bola_authorization_bypass", "authorization", "idor", "privilege_escalation"):
+            return await AuthorizationEngine.execute(base_url, test_payload)
+
+        elif attack_type in ("auth_resilience", "rate_limiting", "tampered_token", "account_enumeration"):
+            return await AuthenticationResilienceEngine.execute(base_url, test_payload)
+
+        elif attack_type in ("api_security", "cors", "verb_tampering", "sensitive_exposure"):
+            return await APISecurityEngine.execute(base_url, test_payload)
+
+        elif attack_type in ("business_logic", "price_manipulation", "coupon_stacking"):
+            return await BusinessLogicEngine.execute(base_url, test_payload)
+
+        elif attack_type in ("race_condition", "double_spend", "concurrency_race_condition"):
+            return await RaceConditionEngine.execute(base_url, test_payload)
+
+        # Default fallback security probe
         start_time = time.time()
         vulnerability_detected = False
+        target_url = base_url.rstrip("/") + (path if path.startswith("/") else "/" + path)
         details = ""
 
         async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-            if attack_type == "bola_authorization_bypass":
-                # Send request without Authorization header or with unauthorized token
-                res = await client.get(target_url, headers={"Authorization": "Bearer invalid_unauthorized_token"})
-                if res.status_code == 200:
-                    vulnerability_detected = True
-                    details = "BOLA/IDOR vulnerability detected: Endpoint accessible with unauthorized token."
-                else:
-                    details = f"Endpoint properly returned {res.status_code} for unauthorized request."
-
-            elif attack_type == "sql_injection":
-                sqli_payload = "' OR '1'='1"
-                res = await client.get(f"{target_url}?id={sqli_payload}")
-                if res.status_code == 200 and ("SQL" in res.text or "syntax" in res.text or "sqlite" in res.text.lower() or "pg_" in res.text):
-                    vulnerability_detected = True
-                    details = "SQL Injection vulnerability detected: Database error or full dataset leaked in response."
-                else:
-                    details = "No raw SQL injection pattern detected."
+            res = await client.get(target_url, headers={"Authorization": "Bearer invalid_unauthorized_token"})
+            if res.status_code == 200 and not any(p in path.lower() for p in ["health", "login", "register", "catalog", "search"]):
+                vulnerability_detected = True
+                details = f"Authorization boundary failure on {path}: Endpoint accessible with unauthorized token."
+            else:
+                details = f"Security baseline passed for {path}."
 
         elapsed_ms = (time.time() - start_time) * 1000.0
-
         return {
             "vulnerability_detected": vulnerability_detected,
             "attack_type": attack_type,
